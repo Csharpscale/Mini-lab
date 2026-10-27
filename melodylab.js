@@ -1,7 +1,19 @@
 (() => {
 	"use strict";
 
-	const MAJOR_PATTERN = [0, 2, 4, 5, 7, 9, 11];
+	const SCALES = {
+		major: { name: "Major", intervals: [0, 2, 4, 5, 7, 9, 11] }, naturalMinor: { name: "Natural Minor", intervals: [0, 2, 3, 5, 7, 8, 10] },
+		harmonicMinor: { name: "Harmonic Minor", intervals: [0, 2, 3, 5, 7, 8, 11] }, melodicMinor: { name: "Melodic Minor", intervals: [0, 2, 3, 5, 7, 9, 11] },
+		majorPentatonic: { name: "Major Pentatonic", intervals: [0, 2, 4, 7, 9] }, minorPentatonic: { name: "Minor Pentatonic", intervals: [0, 3, 5, 7, 10] },
+		dorian: { name: "Dorian", intervals: [0, 2, 3, 5, 7, 9, 10] }, phrygian: { name: "Phrygian", intervals: [0, 1, 3, 5, 7, 8, 10] }, blues: { name: "Blues", intervals: [0, 3, 5, 6, 7, 10] }
+	};
+	const TRIAD_TYPES = [
+		{ id: "major", suffix: "", intervals: [0, 4, 7], intervalNames: ["Root", "Major 3rd", "Perfect 5th"] },
+		{ id: "minor", suffix: "m", intervals: [0, 3, 7], intervalNames: ["Root", "Minor 3rd", "Perfect 5th"] },
+		{ id: "diminished", suffix: "dim", intervals: [0, 3, 6], intervalNames: ["Root", "Minor 3rd", "Diminished 5th"] },
+		{ id: "augmented", suffix: "+", intervals: [0, 4, 8], intervalNames: ["Root", "Major 3rd", "Augmented 5th"] }
+	];
+	const CHORD_PRACTICE_STAGES = [{ id: "triads", chordTypes: ["major", "minor"] }];
 	const SHARP_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 	const FLAT_NAMES = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"];
 	const NOTE_LETTERS = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
@@ -100,6 +112,22 @@
 		keyboardAudioEnabled: document.querySelector("#keyboard-audio-enabled"),
 		scaleTitle: document.querySelector("#scale-summary-title"),
 		scaleNotes: document.querySelector("#scale-notes"),
+		chordOptions: document.querySelector("#chord-options"),
+		optionalChordOptions: document.querySelector("#optional-chord-options"),
+		chordSelection: document.querySelector("#chord-selection"),
+		chordLessonCount: document.querySelector("#chord-lesson-count"),
+		chordProgress: document.querySelector("#chord-progress"),
+		chordProgressFill: document.querySelector("#chord-progress-fill"),
+		chordExerciseLabel: document.querySelector("#chord-exercise-label"),
+		chordExerciseTitle: document.querySelector("#chord-exercise-title"),
+		chordExerciseDescription: document.querySelector("#chord-exercise-description"),
+		chordTargetNotes: document.querySelector("#chord-target-notes"),
+		chordPracticeFeedback: document.querySelector("#chord-practice-feedback"),
+		chordPracticalTip: document.querySelector("#chord-practical-tip"),
+		chordDemonstrate: document.querySelector("#chord-demonstrate"),
+		chordBrokenDemo: document.querySelector("#chord-broken-demo"),
+		chordReset: document.querySelector("#chord-reset"),
+		chordNext: document.querySelector("#chord-next"),
 		noteName: document.querySelector("#note-name"),
 		noteMidi: document.querySelector("#note-midi"),
 		noteMembership: document.querySelector("#note-membership"),
@@ -114,6 +142,9 @@
 		gamesNav: document.querySelector("#games-nav"),
 		gameHub: document.querySelector("#games"),
 		lessonShell: document.querySelector("#keyboard-explorer"),
+		lessonNumber: document.querySelector("#lesson-number"),
+		lessonTopic: document.querySelector("#lesson-topic"),
+		lessonTitle: document.querySelector("#lesson-title"),
 		chordLesson: document.querySelector("#chord-lesson"),
 		openKeyboardLesson: document.querySelector("#open-keyboard-lesson"),
 		openChordLesson: document.querySelector("#open-chord-lesson"),
@@ -143,6 +174,7 @@
 
 	const state = {
 		root: 0,
+		scale: "major",
 		notation: "sharp",
 		startMidi: 48,
 		selectedMidi: 48,
@@ -164,7 +196,10 @@
 		returnToAssessment: false,
 		practicalComplete: false,
 		assessmentSubmitted: false,
-		chordPractice: new Set()
+		chordPractice: new Set(),
+		chordExerciseIndex: 0,
+		chordLessonFinished: false,
+		chord: null
 	};
 
 	function midiToPitchClass(midi) {
@@ -263,6 +298,31 @@
 		});
 	}
 
+	function playFallbackTone(midi, audioContext, options) {
+		const source = audioContext.createOscillator();
+		const gain = audioContext.createGain();
+		const now = audioContext.currentTime;
+		const voice = { audioContext, source, gain, ended: false, midiHeld: Boolean(options.isCurrent) };
+		source.type = "sine";
+		source.frequency.setValueAtTime(440 * (2 ** ((midi - 69) / 12)), now);
+		gain.gain.setValueAtTime(0, now);
+		gain.gain.linearRampToValueAtTime(0.16, now + 0.025);
+		source.connect(gain);
+		gain.connect(audioContext.destination);
+		if (!state.activeVoices.has(midi)) state.activeVoices.set(midi, new Set());
+		state.activeVoices.get(midi).add(voice);
+		source.addEventListener("ended", () => {
+			voice.ended = true;
+			removeVoice(midi, voice);
+		}, { once: true });
+		source.start(now);
+		if (!voice.midiHeld) {
+			gain.gain.setTargetAtTime(0, now + 0.65, 0.12);
+			source.stop(now + 1.1);
+		}
+		return true;
+	}
+
 	async function playPianoNote(midi, options = {}) {
 		if (!state.virtualAudioEnabled) return false;
 		const mapping = getSampleMapping(midi);
@@ -270,7 +330,14 @@
 		try {
 			const audioContext = getAudioContext();
 			if (audioContext.state === "suspended") await audioContext.resume();
-			const buffer = await getDecodedSample(mapping.sampleMidi);
+			let buffer;
+			try {
+				buffer = await getDecodedSample(mapping.sampleMidi);
+			} catch (error) {
+				console.warn(`Piano sample unavailable; using a soft tone for MIDI ${midi}.`, error);
+				if (!state.virtualAudioEnabled || (options.isCurrent && !options.isCurrent())) return false;
+				return playFallbackTone(midi, audioContext, options);
+			}
 			if (!state.virtualAudioEnabled || (options.isCurrent && !options.isCurrent())) return false;
 
 			const source = audioContext.createBufferSource();
@@ -308,13 +375,15 @@
 		return `${names[midiToPitchClass(midi)]}${midiToOctave(midi)}`;
 	}
 
+	function getScalePattern() { return SCALES[state.scale].intervals; }
+
 	function getScalePitchClasses(root = state.root) {
-		return new Set(MAJOR_PATTERN.map((step) => (root + step) % 12));
+		return new Set(getScalePattern().map((step) => (root + step) % 12));
 	}
 
 	function getScaleDegree(midi) {
 		const interval = (midiToPitchClass(midi) - state.root + 12) % 12;
-		const degreeIndex = MAJOR_PATTERN.indexOf(interval);
+		const degreeIndex = getScalePattern().indexOf(interval);
 		return degreeIndex === -1 ? null : DEGREE_NAMES[degreeIndex];
 	}
 
@@ -323,6 +392,7 @@
 	}
 
 	function populateSelectors() {
+		elements.scale.replaceChildren();
 		NOTE_LETTERS.forEach((name, pitchClass) => {
 			const option = document.createElement("option");
 			option.value = String(pitchClass);
@@ -336,6 +406,9 @@
 			elements.octave.append(option);
 		}
 		elements.root.value = "0";
+		Object.entries(SCALES).forEach(([value, scale]) => {
+			const option = document.createElement("option"); option.value = value; option.textContent = scale.name; elements.scale.append(option);
+		});
 		elements.octave.value = String(state.startMidi);
 	}
 
@@ -371,6 +444,7 @@
 			key.setAttribute("aria-pressed", String(state.selectedMidi === midi));
 			if (state.selectedMidi === midi) key.classList.add("selected");
 			if (state.pressedMidi.has(midi)) key.classList.add("pressed");
+			if (state.chord?.pitchClasses.has(pitchClass)) key.classList.add("chord-tone");
 			const whiteIndex = getWhiteKeyIndex(midi);
 			key.style.left = isWhite
 				? `calc(${whiteIndex} * var(--white-key-width))`
@@ -380,6 +454,18 @@
 				selectNote(midi);
 				playPianoNote(midi);
 			});
+			const setVirtualPressed = (pressed) => {
+				if (pressed) state.pressedMidi.add(midi);
+				else state.pressedMidi.delete(midi);
+				updateKeyStates();
+			};
+			key.addEventListener("pointerdown", (event) => {
+				setVirtualPressed(true);
+				key.setPointerCapture?.(event.pointerId);
+			});
+			key.addEventListener("pointerup", () => setVirtualPressed(false));
+			key.addEventListener("pointercancel", () => setVirtualPressed(false));
+			key.addEventListener("lostpointercapture", () => setVirtualPressed(false));
 			elements.keyboard.append(key);
 		});
 
@@ -389,6 +475,104 @@
 		updateScaleSummary();
 		updateNoteInfo(state.selectedMidi);
 		applyLessonHighlights();
+	}
+
+	function getDiatonicTriads() {
+		const scalePitches = getScalePitchClasses();
+		return getScalePattern().map((rootInterval) => (state.root + rootInterval) % 12)
+			.flatMap((root) => TRIAD_TYPES
+				.filter((type) => type.intervals.every((interval) => scalePitches.has((root + interval) % 12)))
+				.map((type) => ({
+					id: `${root}-${type.id}`,
+					name: `${getScaleSpelling(root)}${type.suffix}`,
+					suffix: type.suffix,
+					root,
+					type: type.id,
+					intervalNames: type.intervalNames,
+					intervals: type.intervals,
+					pitchClasses: type.intervals.map((interval) => (root + interval) % 12),
+					inScale: true
+				})));
+	}
+
+	function getOptionalTriads() {
+		const scalePitches = getScalePitchClasses();
+		const diatonicIds = new Set(getDiatonicTriads().map((chord) => chord.id));
+		return getScalePattern().map((rootInterval) => (state.root + rootInterval) % 12)
+			.flatMap((root) => TRIAD_TYPES
+				.filter((type) => (type.id === "major" || type.id === "minor")
+					&& !type.intervals.every((interval) => scalePitches.has((root + interval) % 12)))
+				.map((type) => ({
+					id: `${root}-${type.id}`,
+					name: `${getScaleSpelling(root)}${type.suffix}`,
+					suffix: type.suffix,
+					root,
+					type: type.id,
+					intervalNames: type.intervalNames,
+					intervals: type.intervals,
+					pitchClasses: type.intervals.map((interval) => (root + interval) % 12),
+					inScale: false
+				})))
+			.filter((chord) => !diatonicIds.has(chord.id));
+	}
+
+	function renderChordLibrary() {
+		if (!elements.chordOptions) return;
+		const rootName = (pitch) => getScaleSpelling(pitch);
+		const addChordButton = (chord, container) => {
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "chord-choice";
+			button.setAttribute("aria-pressed", String(state.chord?.id === chord.id));
+			const name = document.createElement("strong");
+			name.textContent = chord.name;
+			const notes = document.createElement("span");
+			notes.textContent = chord.pitchClasses.map(rootName).join(" · ");
+			const membership = document.createElement("span");
+			membership.className = "chord-membership";
+			const outsideCount = chord.pitchClasses.filter((pitch) => !getScalePitchClasses().has(pitch)).length;
+			membership.textContent = chord.inScale
+				? "All notes in scale"
+				: `${outsideCount} outside ${outsideCount === 1 ? "note" : "notes"}`;
+			button.append(name, notes, membership);
+			button.addEventListener("click", () => {
+				if (state.chord?.id === chord.id) state.chord = null;
+				else {
+					state.chord = { ...chord, pitchClasses: new Set(chord.pitchClasses) };
+					const rootMidi = 60 + chord.root;
+					chord.intervals.forEach((interval) => playPianoNote(rootMidi + interval));
+				}
+				renderChordSelection();
+				updateKeyStates();
+				renderChordLibrary();
+			});
+			container.append(button);
+		};
+		elements.chordOptions.replaceChildren();
+		elements.optionalChordOptions.replaceChildren();
+		const inScaleChords = getDiatonicTriads();
+		const optionalChords = getOptionalTriads();
+		inScaleChords.forEach((chord) => addChordButton(chord, elements.chordOptions));
+		optionalChords.forEach((chord) => addChordButton(chord, elements.optionalChordOptions));
+		if (!inScaleChords.length) elements.chordOptions.textContent = "No complete triads in this scale.";
+		if (!optionalChords.length) elements.optionalChordOptions.textContent = "No optional major or minor triads for this scale.";
+		renderChordSelection();
+	}
+
+	function renderChordSelection() {
+		if (!elements.chordSelection) return;
+		if (!state.chord) {
+			elements.chordSelection.textContent = "Select a chord to highlight its tones and hear it.";
+			return;
+		}
+		const notes = state.chord.pitchClasses;
+		const absent = Array.from(notes).filter((pitch) => !Array.from(elements.keyboard.querySelectorAll(".piano-key")).some((key) => midiToPitchClass(Number(key.dataset.midi)) === pitch));
+		const rangeMessage = absent.length ? ` · ${absent.map(getScaleSpelling).join(" · ")} has no key in this range` : "";
+		const chordName = `${getScaleSpelling(state.chord.root)}${state.chord.suffix}`;
+		const membership = state.chord.inScale
+			? "Every note is in the selected scale"
+			: `Outside scale: ${Array.from(notes).filter((pitch) => !getScalePitchClasses().has(pitch)).map(getScaleSpelling).join(" · ")}`;
+		elements.chordSelection.textContent = `${chordName}: ${Array.from(notes, getScaleSpelling).join(" · ")} · ${membership}${rangeMessage}`;
 	}
 
 	function getScaleSpelling(pitchClass) {
@@ -401,9 +585,10 @@
 		Array.from(elements.root.options).forEach((option) => {
 			option.textContent = getScaleSpelling(Number(option.value));
 		});
-		const scalePitches = MAJOR_PATTERN.map((step) => getScaleSpelling((state.root + step) % 12));
-		elements.scaleTitle.textContent = `${rootName} Major`;
+		const scalePitches = getScalePattern().map((step) => getScaleSpelling((state.root + step) % 12));
+		elements.scaleTitle.textContent = `${rootName} ${SCALES[state.scale].name}`;
 		elements.scaleNotes.textContent = scalePitches.join(" · ");
+		renderChordLibrary();
 	}
 
 	function selectNote(midi, source = "virtual") {
@@ -421,16 +606,23 @@
 		elements.noteName.textContent = getNoteName(midi);
 		elements.noteMidi.textContent = `MIDI ${midi} · Octave ${midiToOctave(midi)}`;
 		elements.noteMembership.classList.toggle("outside", !inScale);
-		elements.noteMembership.innerHTML = `<i></i> ${inScale ? `In ${rootName} Major` : "Outside selected scale"}${degree ? ` <span class="degree-label">· ${degree} degree</span>` : ""}`;
+		elements.noteMembership.innerHTML = `<i></i> ${inScale ? `In ${rootName} ${SCALES[state.scale].name}` : "Outside selected scale"}${degree ? ` <span class="degree-label">· ${degree} degree</span>` : ""}`;
 	}
 
 	function updateKeyStates() {
+		const practiceChord = state.lessonOpen && !elements.chordLesson.hidden
+			? getChordExercises()[state.chordExerciseIndex]
+			: null;
+		const highlightedPitchClasses = practiceChord
+			? new Set(practiceChord.pitchClasses)
+			: state.chord?.pitchClasses;
 		elements.keyboard.querySelectorAll(".piano-key").forEach((key) => {
 			const midi = Number(key.dataset.midi);
 			const isSelected = midi === state.selectedMidi;
 			const isPressed = state.pressedMidi.has(midi);
 			key.classList.toggle("selected", isSelected);
 			key.classList.toggle("pressed", isPressed);
+			key.classList.toggle("chord-tone", Boolean(highlightedPitchClasses?.has(midiToPitchClass(midi))));
 			key.setAttribute("aria-pressed", String(isSelected || isPressed));
 		});
 		applyLessonHighlights();
@@ -456,6 +648,130 @@
 		});
 	}
 
+	function getChordExercises() {
+		const practiceStage = CHORD_PRACTICE_STAGES[0];
+		const chords = getDiatonicTriads().filter((chord) => practiceStage.chordTypes.includes(chord.type));
+		const tonic = chords.find((chord) => chord.root === state.root);
+		const major = chords.find((chord) => chord.root === state.root && chord.type === "major")
+			|| chords.find((chord) => chord.root === (state.root + 3) % 12 && chord.type === "major")
+			|| chords.find((chord) => chord.type === "major");
+		const minor = chords.find((chord) => chord.root === state.root && chord.type === "minor")
+			|| chords.find((chord) => chord.root === (state.root + 9) % 12 && chord.type === "minor")
+			|| chords.find((chord) => chord.type === "minor");
+		const ordered = tonic ? [tonic, tonic.type === "major" ? minor : major] : [major, minor];
+		const unique = ordered.filter((chord, index) => chord && ordered.indexOf(chord) === index);
+		const keyboardNotes = getKeyboardMidiNotes();
+		const midpoint = (keyboardNotes[0] + keyboardNotes[keyboardNotes.length - 1]) / 2;
+		return unique.map((chord) => {
+			const rootCandidates = keyboardNotes.filter((midi) => midiToPitchClass(midi) === chord.root);
+			const voicing = rootCandidates
+				.map((rootMidi) => chord.intervals.map((interval) => rootMidi + interval))
+				.filter((notes) => notes.every((midi) => keyboardNotes.includes(midi)))
+				.sort((left, right) => {
+					const leftCenter = left.reduce((sum, midi) => sum + midi, 0) / left.length;
+					const rightCenter = right.reduce((sum, midi) => sum + midi, 0) / right.length;
+					return Math.abs(leftCenter - midpoint) - Math.abs(rightCenter - midpoint);
+				})[0];
+			return { ...chord, midiNotes: voicing || [] };
+		}).filter((chord) => chord.midiNotes.length === chord.intervals.length);
+	}
+
+	function renderChordLesson(reset = false) {
+		if (!elements.chordLesson || elements.chordLesson.hidden) return;
+		const exercises = getChordExercises();
+		if (reset) {
+			state.chordExerciseIndex = 0;
+			state.chordPractice.clear();
+			state.chordLessonFinished = false;
+		}
+		if (!exercises.length) {
+			state.chord = null;
+			elements.chordLessonCount.textContent = "No in-scale triads available";
+			elements.chordProgress.setAttribute("aria-valuemax", "1");
+			elements.chordProgress.setAttribute("aria-valuenow", "0");
+			elements.chordProgressFill.style.width = "0%";
+			elements.chordExerciseTitle.textContent = "Try another scale";
+			elements.chordExerciseDescription.textContent = "This scale has no complete major or minor triads. Choose a different root or scale above to find chords made only from its notes.";
+			elements.chordTargetNotes.replaceChildren();
+			elements.chordPracticeFeedback.textContent = "The chord library below still shows optional major and minor triads that introduce outside notes.";
+			elements.chordPracticalTip.textContent = "";
+			elements.chordDemonstrate.disabled = true;
+			elements.chordBrokenDemo.disabled = true;
+			elements.chordNext.disabled = true;
+			updateKeyStates();
+			return;
+		}
+		state.chordExerciseIndex = Math.min(state.chordExerciseIndex, exercises.length - 1);
+		const chord = exercises[state.chordExerciseIndex];
+		const isMajor = chord.type === "major";
+		const chordNotes = chord.midiNotes.map((midi) => getNoteName(midi));
+		state.chord = { ...chord, pitchClasses: new Set(chord.pitchClasses) };
+		elements.chordLessonCount.textContent = `Exercise ${state.chordExerciseIndex + 1} of ${exercises.length}`;
+		elements.chordProgress.setAttribute("aria-valuemax", String(exercises.length));
+		elements.chordProgress.setAttribute("aria-valuenow", String(state.chordExerciseIndex));
+		elements.chordProgressFill.style.width = `${(state.chordExerciseIndex / exercises.length) * 100}%`;
+		elements.chordExerciseLabel.textContent = `STAGE 01 · ${isMajor ? "MAJOR" : "MINOR"} TRIAD`;
+		elements.chordExerciseTitle.textContent = `${chord.name} · ${isMajor ? "bright, settled color" : "soft, wistful color"}`;
+		elements.chordExerciseDescription.textContent = `A ${isMajor ? "major" : "minor"} triad is a root, a ${isMajor ? "major third (+4 semitones)" : "minor third (+3 semitones)"}, and a perfect fifth (+7). These notes all belong to the selected ${getScaleSpelling(state.root)} ${SCALES[state.scale].name} scale. Hear the voicing, then play each exact key below in any order.`;
+		elements.chordTargetNotes.replaceChildren();
+		chord.midiNotes.forEach((midi, index) => {
+			const note = document.createElement("span");
+			note.className = "chord-note-target";
+			note.dataset.midi = String(midi);
+			note.innerHTML = `<strong>${getNoteName(midi)}</strong><span>${chord.intervalNames[index]}</span>`;
+			elements.chordTargetNotes.append(note);
+		});
+		elements.chordPracticeFeedback.textContent = `Notes to play: ${chordNotes.join(" · ")}. Play them on the virtual keys or your connected MIDI controller.`;
+		elements.chordPracticalTip.textContent = isMajor
+			? "Try holding this as a home chord. Move to a nearby minor triad for a wistful shift, then resolve back; shared notes keep the voice leading smooth. A brief outside note can add tension before it settles."
+			: "Let the minor chord ring for a nostalgic color, or replay it as a broken chord one note at a time. Moving to a nearby major chord can feel like a gentle lift.";
+		elements.chordDemonstrate.disabled = false;
+		elements.chordBrokenDemo.disabled = false;
+		elements.chordNext.disabled = state.chordPractice.size !== chord.midiNotes.length;
+		elements.chordNext.innerHTML = state.chordExerciseIndex === exercises.length - 1
+			? 'Practice again <span aria-hidden="true">↻</span>'
+			: 'Next chord <span aria-hidden="true">→</span>';
+		elements.chordTargetNotes.querySelectorAll(".chord-note-target").forEach((target) => {
+			target.classList.toggle("complete", state.chordPractice.has(Number(target.dataset.midi)));
+		});
+		renderChordLibrary();
+		updateKeyStates();
+	}
+
+	function playChordDemonstration(broken = false) {
+		const chord = getChordExercises()[state.chordExerciseIndex];
+		if (!chord) return;
+		if (broken) {
+			chord.midiNotes.forEach((midi, index) => {
+				window.setTimeout(() => playPianoNote(midi), index * 360);
+			});
+			return;
+		}
+		chord.midiNotes.forEach((midi) => playPianoNote(midi));
+	}
+
+	function advanceChordLesson() {
+		const exercises = getChordExercises();
+		if (state.chordLessonFinished) {
+			renderChordLesson(true);
+			return;
+		}
+		if (state.chordPractice.size !== exercises[state.chordExerciseIndex]?.midiNotes.length) return;
+		if (state.chordExerciseIndex >= exercises.length - 1) {
+			state.chordLessonFinished = true;
+			state.chordPractice.clear();
+			state.chordExerciseIndex = 0;
+			renderChordLesson();
+			elements.chordPracticeFeedback.textContent = "Lovely work. You completed this scale’s major/minor triad practice. Listen again, or change the root or scale above to explore a new color.";
+			elements.chordNext.disabled = false;
+			elements.chordNext.innerHTML = 'Practice again <span aria-hidden="true">↻</span>';
+			return;
+		}
+		state.chordExerciseIndex += 1;
+		state.chordPractice.clear();
+		renderChordLesson();
+	}
+
 	function recordLessonSelection(midi) {
 		if (state.lessonOpen && !elements.tourView.hidden) {
 			if (state.tourStep === 2) {
@@ -474,16 +790,38 @@
 			elements.submitAssessment.disabled = false;
 		}
 		if (state.lessonOpen && !elements.chordLesson.hidden) {
-			state.chordPractice.add(midiToPitchClass(midi));
-			const expected = [0, 4, 7];
-			const present = expected.filter((pitch) => state.chordPractice.has(pitch));
-			document.querySelector("#chord-feedback").textContent = `Heard: ${Array.from(state.chordPractice, (pitch) => getScaleSpelling(pitch)).join(" · ") || "none yet"}. C major tones: ${present.length}/3 present${present.length === 3 ? " — complete chord!" : ". Add the missing tone(s)."}`;
+			if (state.chordLessonFinished) return;
+			const exercise = getChordExercises()[state.chordExerciseIndex];
+			if (!exercise) return;
+			if (exercise.midiNotes.includes(midi)) {
+				state.chordPractice.add(midi);
+				const completedCount = state.chordPractice.size;
+				if (completedCount === exercise.midiNotes.length) {
+					elements.chordPracticeFeedback.textContent = `Beautifully played: ${exercise.midiNotes.map((note) => getNoteName(note)).join(" · ")}. Chord complete — continue when you’re ready.`;
+					elements.chordNext.disabled = false;
+					elements.chordProgress.setAttribute("aria-valuenow", String(state.chordExerciseIndex + 1));
+					elements.chordProgressFill.style.width = `${((state.chordExerciseIndex + 1) / getChordExercises().length) * 100}%`;
+				} else {
+					elements.chordPracticeFeedback.textContent = `${getNoteName(midi)} is in. ${completedCount} of ${exercise.midiNotes.length} notes played; find the remaining highlighted tones.`;
+				}
+				elements.chordTargetNotes.querySelectorAll(".chord-note-target").forEach((target) => {
+					target.classList.toggle("complete", state.chordPractice.has(Number(target.dataset.midi)));
+				});
+			} else if (exercise.pitchClasses.includes(midiToPitchClass(midi))) {
+				const expected = exercise.midiNotes.find((note) => midiToPitchClass(note) === midiToPitchClass(midi));
+				elements.chordPracticeFeedback.textContent = `${getNoteName(midi)} is the right chord tone in another octave. This voicing asks for ${getNoteName(expected)} in the displayed keyboard range.`;
+			} else {
+				elements.chordPracticeFeedback.textContent = `${getNoteName(midi)} is outside this triad. Follow the highlighted tones, or play one of them to hear the chord color.`;
+			}
 		}
 	}
 
 	function openLesson() {
 		state.lessonOpen = true;
 		elements.chordLesson.hidden = true;
+		elements.lessonNumber.textContent = "LESSON 01";
+		elements.lessonTopic.textContent = "KEYBOARD FUNDAMENTALS";
+		elements.lessonTitle.textContent = "Keyboard Explorer";
 		state.returnToAssessment = false;
 		elements.gameHub.hidden = true;
 		document.querySelector(".hero").hidden = false;
@@ -723,9 +1061,17 @@
 	}
 
 	function handleScaleChange() {
-		state.root = Number(elements.root.value);
+		const nextRoot = Number(elements.root.value);
+		const nextScale = elements.scale.value;
+		const scaleChanged = nextRoot !== state.root || nextScale !== state.scale;
+		if (scaleChanged) state.chord = null;
+		state.root = nextRoot;
+		state.scale = nextScale;
 		state.notation = elements.notation.value;
+		if (!scaleChanged && state.chordLessonFinished) state.chordLessonFinished = false;
 		renderKeyboard();
+		renderChordSelection();
+		if (!elements.chordLesson.hidden) renderChordLesson(scaleChanged);
 	}
 
 	function setMidiStatus(message, kind = "") {
@@ -855,15 +1201,27 @@
 			openLesson();
 		});
 		elements.lessonExit.addEventListener("click", closeLesson);
-		elements.openKeyboardLesson.addEventListener("click", () => { elements.chordLesson.hidden = true; elements.tourView.hidden = false; elements.assessmentView.hidden = true; });
-		elements.openChordLesson.addEventListener("click", () => { elements.chordLesson.hidden = false; elements.tourView.hidden = true; elements.assessmentView.hidden = true; state.chordPractice.clear(); });
-		const chords = { C: [60,64,67], Am: [57,60,64], Cmaj7: [60,64,67,71], Am7: [57,60,64,67], Fmaj7: [53,57,60,64], G7: [55,59,62,65] };
-		const voicings = [[48,52,55],[52,55,60],[55,60,64]];
-		const playSequence = (notes) => notes.forEach((midi) => playPianoNote(midi));
-		document.querySelectorAll("[data-note]").forEach((button) => button.addEventListener("click", () => playPianoNote(Number(button.dataset.note))));
-		document.querySelectorAll("[data-chord]").forEach((button) => button.addEventListener("click", () => { state.chordPractice.clear(); playSequence(chords[button.dataset.chord]); }));
-		document.querySelectorAll("[data-voicing]").forEach((button) => button.addEventListener("click", () => { state.chordPractice.clear(); playSequence(voicings[Number(button.dataset.voicing)]); document.querySelector("#chord-feedback").textContent = `Playing ${button.textContent}. Bass: ${getNoteName(voicings[Number(button.dataset.voicing)][0])}.`; }));
-		document.querySelector("#compare-voicings").addEventListener("click", () => { playSequence(voicings[0]); window.setTimeout(() => playSequence(voicings[1]), 1200); });
+		elements.openKeyboardLesson.addEventListener("click", () => {
+			elements.chordLesson.hidden = true;
+			elements.tourView.hidden = false;
+			elements.assessmentView.hidden = true;
+			elements.lessonNumber.textContent = "LESSON 01";
+			elements.lessonTopic.textContent = "KEYBOARD FUNDAMENTALS";
+			elements.lessonTitle.textContent = "Keyboard Explorer";
+		});
+		elements.openChordLesson.addEventListener("click", () => {
+			elements.chordLesson.hidden = false;
+			elements.tourView.hidden = true;
+			elements.assessmentView.hidden = true;
+			elements.lessonNumber.textContent = "LESSON 02";
+			elements.lessonTopic.textContent = "LO-FI CHORD PRACTICE";
+			elements.lessonTitle.textContent = "Lo-fi Chord Practice";
+			renderChordLesson(true);
+		});
+		elements.chordDemonstrate.addEventListener("click", () => playChordDemonstration());
+		elements.chordBrokenDemo.addEventListener("click", () => playChordDemonstration(true));
+		elements.chordReset.addEventListener("click", () => renderChordLesson(true));
+		elements.chordNext.addEventListener("click", advanceChordLesson);
 		elements.tourBack.addEventListener("click", () => {
 			if (state.tourStep > 0) renderTourStep(state.tourStep - 1);
 		});
@@ -937,6 +1295,8 @@
 		getScaleDegree,
 		midiToOctave,
 		playNote: playPianoNote,
-		majorPattern: MAJOR_PATTERN.slice()
+		majorPattern: SCALES.major.intervals.slice(),
+		getScaleNotes: (root = state.root, scale = state.scale) => SCALES[scale].intervals.map((step) => (root + step) % 12),
+		scales: Object.fromEntries(Object.entries(SCALES).map(([id, scale]) => [id, scale.intervals.slice()]))
 	});
 })();
